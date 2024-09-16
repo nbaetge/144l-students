@@ -1,0 +1,361 @@
+---
+title: "EEMB 144L Week 6Tutorial"
+author: "Kerri Luttrell"
+date: "11/15/2020"
+output: github_document
+---
+
+# Intro
+
+We explore the processed ACIDD 16S sequences using [phyloseq](https://joey711.github.io/phyloseq/). 
+
+# Install phyloseq
+
+```{r}
+#BiocManager::install("phyloseq")
+```
+
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse) 
+library(phyloseq)
+library(RColorBrewer)
+```
+
+# Import Data 
+
+```{r message = F}
+count.tab <- read_rds("~/Github/144l_students/Input_Data/week5/144L_seqtab-nochimtaxa.rds") #table of counts for each sequence in each sample
+  tax.tab <- read_rds("~/Github/144l_students/Input_Data/week5/144L_taxa.rds") #table that matches ASV to sequence
+sample.tab <- read_rds("~/Github/144l_students/144L_Processed_DOC_BGE.rds") %>% 
+  drop_na(DNA_SampleID) %>%
+  column_to_rownames(var = "DNA_SampleID") 
+
+# had to go back and reselct columns in week 4 homework creation of "merge" data table, which was eventually used to create "averages", and stored in 144L_Exp_Processed_DOC_BGE.rds
+# the originally select command include "-c(contains("Sample"))", which I replace with "-c(TOC_Sample:DNA_Sample)" so that the DNA_SampleID is preserved
+# In the future, if we run into the issue that we removed a column that we needed, trace back through the file in which you created the document, then command F each previous data table until you find the chunk in which you failed to select for the absent column
+```
+
+# Phyloseq Object
+
+
+```{r}
+OTU = otu_table(count.tab, taxa_are_rows = TRUE) 
+#count table corresponds to OTU/ASV table
+TAX = tax_table(tax.tab)
+SAM = sample_data(sample.tab)
+ps = phyloseq(OTU,TAX,SAM) 
+
+```
+
+# Filter sequences
+
+Because we only want to examine heterotrophic bacteria, we will filter out sequences that correspond to chloroplasts and mitochondria. We have sequences that correspond to both the order Chloroplast and family Mitochondria.
+```{r}
+
+sub_ps <- ps %>%
+   subset_samples(sample_names(ps) != "144_B0_S9") %>%  
+ 
+  #used this function to throw out sample 144_B0_S9, which had incredibly low reads and poor quality in our Week 5 assignement
+  subset_taxa(Family  != "mitochondria" & Order  != "Chloroplast")
+```
+
+# Sample Summary
+
+We will do a "read check" and look at distrivution of read counts from sample.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 4, fig.width = 6, fig.align = "center"}
+# Make a data frame that includes sample names with a column for the read counts of each sample
+sample_sum_df <- data.frame(sum = sample_sums(sub_ps))
+# Histogram of sample read counts
+ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "#377EB8", binwidth =  1000) +
+  ggtitle("Distribution of sample sequencing depth") + 
+  xlab("Read counts") +
+  theme(axis.title.y = element_blank()) +
+  theme_bw()
+
+```
+
+*FIG 1* This histogram of read count distribution across our samples shows us that most of our samples had read counts of 20,000 or greater. The one sample which had an extremely low number of read counts after processing was thrown out in the creation of our sub_ps phyloseq object.
+
+```{r}
+# mean, max and min of sample read counts
+summary(sample_sum_df)
+```
+
+
+# Beta Diversity
+
+Beta diversity involves calculating metrics such as distances or dissimilarities based on pairwise comparisons of samples – they don’t exist for a single sample, but rather only as metrics that relate samples to each other. i.e. beta diversity = patterns in community structure between samples
+
+Since differences in sampling depths between samples can influence distance/dissimilarity metrics, we first need to somehow normalize the read depth across our samples.
+
+## Subsample
+
+We will rarefy (random subsample with replacement) the read depth of the samples first (scale to the smallest library size).
+
+[Case for not subsampling]( https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1003531)
+
+[Response blog for subsampling](https://www.polarmicrobes.org/how-i-learned-to-stop-worrying-and-love-subsampling-rarifying/)
+
+Read depth is an artifact of a machine made by a company in San Diego, not anything about your samples or their biology. It is totally artifactual, and controlling for artifacts is critical in science. Subsampling randomly is the simplest way to control for this, and the question is whether this is the "best" way of controlling for it. See links above for alternative arguments about what the best way of controlling for this artifact is. 
+
+A strong reason to subsample is to standardize effort. The bottom line is that in all experimental design you should not be comparing things to which you devote different effort in resolution. For instance, you don't sample one site once a week and another once a month if you want to compare the dynamics between the sites. You standardize effort.
+
+With that said, the bigger your differential in mean (or median) read depth (reads/sample) between pre- and post-subsampling, the greater the "effect" on beta diversity. 
+
+Examples:
+
+- means reads before = 40k, mean reads after = 1k, big effect.
+
+- mean reads before = 40k, mean reads after = 20k, small effect.
+----this is our data (34k to 17k)
+
+- mean reads before = 2k, mean reads after = 1k, small effect.
+
+
+We will subsample to the minimum read depth of all samples and not subsample. We'll then compare the mean reads pre- and post-subsampling and also compare beta diversity patterns
+
+```{r}
+ps_min <-  rarefy_even_depth(sub_ps, sample.size = min(sample_sums(sub_ps)))
+mean(sample_sums(sub_ps)) #34086
+mean(sample_sums(ps_min)) #17546 this is also the same as min(sample_sums(sub)ps) 
+```
+
+Based on the mean reads pre- and post-subsampling, subsampling here should have a small effect on our beta diversity patterns.
+
+## NMDS
+
+One of the best exploratory analyses for amplicon data is unconstrained ordinations. Here we will look at non-metric multidimensional scaling (NMDS) ordinations of our full community samples. For NMDS plots it’s important to set a seed since the starting positions of samples in the alogrithm is random.
+
+```{r}
+set.seed(1)
+# it doesnt matter what number we put in set.seed, as long as its the same number every time you run it
+# set.seed keeps the results repeatable so that the same random starting position is chosen each time
+# Ordinate (not subsampled)
+nmds <- ordinate(sub_ps, method = "NMDS",  distance = "bray") # stress = 0.065
+#stress level indicates how well ordination takes 3D data and puts it in 2D  space, if stress level is below 0.2 we proceed with trust
+```
+
+```{r}
+set.seed(1)
+# Ordinate (subsampled)
+nmds_min <- ordinate(ps_min, method = "NMDS",  distance = "bray") # stress = 0.07
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 4, fig.width = 6, fig.align = "center"}
+
+  
+levels <- c("Control", "Ash Leachate", "Mud Leachate", "Glucose_Nitrate_Phosphate")
+nmds.plot <- plot_ordination(sub_ps, nmds,  title = "NMDS") +
+   geom_point(aes(fill = days, shape = factor(Treatment, levels = levels)), alpha = 0.6, stroke = 2, size = 4) +
+  scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_gradient(low = "#0db5e6", high = "#d31f2a") +
+  theme_bw() 
+#removing one of the plotting layers (there are points within points)
+#"Error: Incompatible classes: <Interval> - <numeric>" got this error because days were in long format rather than just one number, so I had to go back into original data table formation in week 4 to fix it
+nmds.plot$layers <- nmds.plot$layers[-1]
+nmds.plot + 
+  guides(fill = guide_colorbar(title = "Days"), shape = guide_legend(title = "Treatment"))
+```
+*FIG 2* This NMDS plot shows that samples from all treatments are more similar in community compostion at Day 0 than at Day 2 or 4. As the experiment progresses over the ays, the distances between the points increases and the samples differentiate from each other. In the Ash Leachate and Glucose_Nitrate_Phosphate treatments, the distance between sample replicates from Day 0, Day 2, and Day 4 is great, indicating changes in community composition of these treatments over time. In contrast, the distance between sample replicates from the Mud Leachate and Control is great between Day 0 and Day 2, but changes very little between Day 2 and Day 4. This pattern of more taxonomic change in the Ash Leachate and GNP treatments than in the Mud Leachate and Control mirrors the pattern of greater cell growth and bioavailability in the Ash Leachate and GNP treatments. From this, we may infer that the taxonomic composition of the community shifted in response to the carbon source, its bioaviliabilty, and its degradation over time. The stress value of this NMDS plot is 0.65.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 4, fig.width = 6, fig.align = "center"}
+nmds_min.plot <- plot_ordination(ps_min, nmds_min,  title = "NMDS") +
+   geom_point(aes(fill = days, shape = factor(Treatment, levels = levels)), alpha = 0.6, stroke = 2, size = 4) +
+  scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_gradient(low = "#0db5e6", high = "#d31f2a") +
+  theme_bw() 
+#removing one of the plotting layers (there are points within points)
+nmds_min.plot$layers <- nmds_min.plot$layers[-1]
+nmds_min.plot + 
+  facet_grid(~Location) +
+  guides(fill = guide_colorbar(title = "Days"), shape = guide_legend(title = "Treatment"))
+```
+*FIG 3* This figure utilizes the rarefyed dataset. As the general patterns of beta diversity using our complete dataset are well represented by this figure using the subsampled dataset, we will use the subsampled dataset moving forward. The stress value of this NMDS plot was 0.07.
+
+
+
+# Alpha Diversity
+
+
+Estimating alpha diversity of microbial communities is [problematic](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC93182/) no matter what you do. 
+
+We are going to calculate the Chao1 index for richness and the Shannon diversity index. 
+
+**it is important to note that the alpha diversity values are not interpretable as “real” numbers of anything (due to the nature of amplicon data), but they can still be useful as relative metrics of comparison. If Chao1 richness goes up, but Shannon diversity goes down, it indicates that the sample may have more ASVs but is dominated by a few of them.**
+
+We will use the subsampled library, which retains estimates of the species abundance of the real population while standardizing sampling effort.
+
+[subsampling  and alpha diversity paper](https://www.frontiersin.org/articles/10.3389/fmicb.2019.02407/full)
+
+[Chao1: nonparametric estimation of minimum community richness](https://www.jstor.org/stable/4615964?seq=1#metadata_info_tab_contents) 
+
+
+```{r}
+richness <- estimate_richness(ps_min, measures = c("Chao1", "Shannon")) %>% 
+  rownames_to_column(., var = "DNA_ID") %>% 
+  mutate_at(vars(DNA_ID), str_replace_all, pattern = "X144", "144") 
+```
+
+
+
+```{r}
+alphadiv <- left_join(richness, sample.tab %>% rownames_to_column(., var = "DNA_ID")) 
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 6, fig.width = 10, fig.align = "center"}
+
+library(ggpubr)
+
+pivot.data <- alphadiv %>% 
+  select(Treatment, Bottle, Timepoint, days, Chao1, Shannon) %>% 
+  pivot_longer(.,  cols = c(Chao1,  Shannon), names_to = "measure", values_to = "est" ) %>% 
+  left_join(., alphadiv %>% 
+              select(Treatment, Bottle, Timepoint, days, se.chao1)) %>% 
+  mutate(se.chao1 = ifelse(measure == "Chao1", se.chao1, NA)) 
+alpha.plot <- ggboxplot(pivot.data, x = "Timepoint", y = "est",
+             color = "Treatment",
+             #palette= "if we wanted to choose colors"
+            xlab = expression(italic(paste(""))), 
+            ylab = expression(italic(paste("Alpha Diversity Measure"))),
+            add = "dotplot",
+            width = 0.2,
+            ggtheme = theme_bw()) +  
+  stat_compare_means(label.x = "4") +
+  facet_grid(measure~ factor(Treatment, levels = levels), scales = "free") 
+alpha.plot
+```
+*FIG 4*  
+Difference in the alpha diversity indexes among conditions were tested using Kruskal Wallis tests; p < 0.05 was considered the threshold significance for a difference between conditions.
+
+This figure illustrates that within the treatments neither richness (Chao index)  nor overall diversity of our samples (Shannon index) significantly changed. This suggests that the richness and evenness was similar between the initial and final conditions. All samples showed a decrease in richness and overall diversity from Timpeoint 0 to Timepoint 4,followed by a subsequent increase in both measures from Timepoint 4 to Timepoint 6. Richness may have increased 
+
+Boxes represent the 1.5 interquartile range, with the internal solid line representing the median. Circles represent data points. p-values are reported for the non-parametric Kruskal Wallis test, which tests whether the means between two groups are equal (ns: p > 0.05, * : p≤ 0.05, ** : p ≤ 0.01).
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 6, fig.width = 10, fig.align = "center"}
+alpha.plot2 <-  ggboxplot(pivot.data, x = "Treatment", y = "est", 
+             color = "Treatment",
+            # palette = c("#0db5e6","#d31f2a"),
+            xlab = expression(italic(paste(""))), 
+            ylab = expression(italic(paste("Alpha Diversity Measure"))),
+            add = "dotplot",
+            width = 0.2,
+            ggtheme = theme_bw()) +  
+  stat_compare_means(label.x = "Mud Leachate") +
+  facet_grid(measure~Timepoint, scales = "free") 
+alpha.plot2
+
+```
+*FIG 5* From this plot we can see that between the treatments the richness was not significantly different between the samples at time point zero(p = 0.52), which is a good reflection of the similarity in starting community composition measures. Overall diversity was not significantly different between the treatments at any timepoint in the experiment. Despite not being significantly different, the overall diversity between treatments varied most at Timepoint 4 (Day 2), which is easily visualized in our NMDS plots. 
+
+
+# Who??
+
+Which taxa were important? Which taxa were contributing to the change in community compositon?
+
+**Note: Recovered 16S rRNA gene copy numbers do not equal organism abundance.**
+
+That said, we can generate a heat map of our samples showing us how the relative abundance of different taxonomic groups change...potentially giving us a visual of which taxa are most important to the alpha and beta diversity patterns we observed. 
+
+First, we're going to generate a custom table that will be easier to work with than a phyloseq object.
+
+## Generate relative abundances
+
+Our data currently shows number gene copies recovered, so we'll convert to percentages (relative abundances)
+
+```{r}
+ps_std <- transform_sample_counts(ps_min, function(x) x/sum(x))
+#count for particular asv divided by count in total sample
+#extract the relative abundance table and coerce into dataframe
+ps_std.tab <- as(otu_table(ps_std), "matrix")
+ps_std.df = as.data.frame(ps_std.tab) 
+```
+
+## Make table
+
+```{r warning = F}
+#first coerce the taxa table into a data frame
+tax.df <-  as.data.frame(tax.tab) 
+#then combine the data frames
+custom.tab <- tax.df %>% 
+  rownames_to_column(., var = "asv") %>% 
+  left_join(., ps_std.df %>% rownames_to_column(., var = "asv")) %>% 
+  mutate(#pcofg = paste(Phylum, "_", Class, "_", Order,"_", Family, "_", Genus)) %>%
+         #pcof = paste(Phylum, "_", Class, "_", Order, "_", Family))%>%
+         pco = paste(Phylum, "_", Class, "_", Order)) %>% 
+  select(-c(asv:Genus)) %>% 
+  select(pco,everything()) %>% 
+  group_by(pco) %>% 
+  summarise_at(vars(contains(c("144"))), sum, na.rm = T) %>% 
+  ungroup()
+
+#save the row names and then make them into the column names
+colnames <- custom.tab[,1] 
+
+#transpose the dataframe so we can merge with the sample info table
+t_custom.tab <-  as.data.frame(t(custom.tab[,-1]))
+
+#add saved column names back into table
+ colnames(t_custom.tab) <- colnames$pco
+
+#merge
+sweet.tab <- t_custom.tab %>% 
+  rownames_to_column(., var = "sample") %>% 
+  left_join(., sample.tab %>% rownames_to_column(., var = "sample") %>% select(sample, Bottle, Treatment, Timepoint, days, cells)) %>% 
+  select(sample, Bottle:cells, everything())
+
+relabund <- sweet.tab %>% 
+  select(-c(sample:cells)) %>% 
+  #remove groups that are completely absent
+  .[ , colSums(.) > 0] %>% 
+  #arrange by biggest contributors
+  .[, order(colSums(-.))] %>% 
+  bind_cols(sweet.tab %>% select(sample:cells), .)
+```
+
+## Heatmap
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 16, fig.width = 10, fig.align = "center"}
+relaheat.data <- relabund %>% 
+  select(-c(sample, Bottle, days, cells)) %>%
+  pivot_longer(.,-c(Treatment:Timepoint), names_to = "taxa", values_to = "relabund") %>% 
+  separate(taxa, into = c("p", "c", "o"), sep = " _ ") 
+ #install.packages("viridis")
+library(viridis)
+
+library (wesanderson)
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+relaheat <- relaheat.data %>%
+  ggplot(aes(x = Timepoint, y = o)) +
+  geom_tile(aes(fill = relabund), color = "white") +
+  scale_fill_gradientn(colours= pal) +
+  labs(x = "Timepoint", y = "Order", fill = "Relative Abundance") +
+facet_grid(~factor(Treatment, levels = levels)) +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 12),
+        legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) 
+relaheat
+```
+
+*FIG 6* In the GNP and Ash Leachate treatments the ASV's of Oceanospirialles substantially increased in relative abundance during the log phase of the experiment, whereas no change or subtle change occurred in the Control and Mud Leachate, respectively. Across all treatments, but especially in the absence of higher relatuve abundances of ASV's of Oceanospirialles, Alteromonadales increased in relatuve abundance by the log phase.  
+
+ASVs belonging to Rhodobacterales increased in relative abundance across all experimental treatments aside from the control.
+
+At the initiation of the experiment the relative abundance of the SAR 11 clade ASV's was especially high in the Mud Leachate and GNP compared to the control. However, in all treatments, the relative abundance of the SAR11 clade ASV's were reduced by the middle of the experiment.Aside from the SAR-11 clade, the initial condition across all experimental treatments was relatively similar, indicating a good quality experimental setup. 
+
+In both the GNP and Ash Leachate treatments, ASVs belonging to Vibrionales, Opitutales, and Bdellovibrionales increased during the final phase (stationary/death) of the experiment. This increase was seen only in the two treatments with the highest % bioavailability of carbon and ∆DOC. This could indicate that these orders contain microbes that are able to make a living off of lower quality (more used up) Carbon left in the substrate or Carbon released from dead cells.
+
+# Save and knit
+
+```{r}
+saveRDS(sweet.tab, "~/Github/144l_students/Input_Data/week 6/Custom_ASV_Table.rds")
+saveRDS(sub_ps, "~/Github/144l_students/Input_Data/week 6/phyloseq_obj.rds")
+saveRDS(ps_min, "~/Github/144l_students/Input_Data/week 6/subsampled_phyloseq_obj.rds")
+saveRDS(alphadiv, "~/Github/144l_students/Input_Data/week 6/alphadiv.rds")
+```
